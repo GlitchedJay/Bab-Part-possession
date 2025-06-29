@@ -1,0 +1,154 @@
+-- BugTool_SingleDoubleTap.lua  (LocalScript under StarterPlayerScripts)
+
+--------------------------------------------------------------------------------
+-- SERVICES
+--------------------------------------------------------------------------------
+local Players          = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RS               = game:GetService("ReplicatedStorage")
+
+--------------------------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------------------------
+local TOOL_NAME        = "2 Delete"
+local ASSET_ID         = 41324945
+local ASSET_UID        = "{99ab22df-ca29-4143-a2fd-Oa1b79db78c2}"
+local DOUBLE_TAP_TIME  = 0.3
+
+--------------------------------------------------------------------------------
+-- REFERENCES
+--------------------------------------------------------------------------------
+local player        = Players.LocalPlayer
+local mouse         = player:GetMouse()
+local Remotes       = RS:WaitForChild("Remotes")
+local StampAsset    = Remotes:WaitForChild("StampAsset")
+
+-- cache your plate folder & Plate part
+local Plates        = workspace:WaitForChild("Plates")
+local localPlate, LPlate
+for _, pf in ipairs(Plates:GetChildren()) do
+    local ov = pf:FindFirstChild("Owner")
+    if ov and ov.Value == player then
+        localPlate = pf
+        LPlate     = pf:FindFirstChild("Plate")
+        break
+    end
+end
+assert(LPlate, "Local plate not found!")
+
+-- ignore your plate for targeting
+mouse.TargetFilter = localPlate
+
+--------------------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------------------
+local equipped   = false
+local target     = nil
+local highlight  = nil
+local lastClick  = 0
+
+--------------------------------------------------------------------------------
+-- BUG FUNCTION (single block)
+--------------------------------------------------------------------------------
+local function bugPart(part)
+    if not (part and part:IsA("BasePart")) then return end
+    local spawnCF = LPlate.CFrame + Vector3.new(0, -20e20, 0)
+    StampAsset:InvokeServer(
+        ASSET_ID,
+        spawnCF,
+        ASSET_UID,
+        { part },  -- weld to the target part
+        0
+    )
+end
+
+--------------------------------------------------------------------------------
+-- HIGHLIGHT LOGIC
+--------------------------------------------------------------------------------
+local function updateHighlight(part)
+    if part and part:IsDescendantOf(localPlate) then
+        part = nil
+    end
+    if highlight then
+        highlight:Destroy()
+        highlight = nil
+    end
+    target = nil
+    if part and part:IsA("BasePart") then
+        highlight = Instance.new("Highlight")
+        highlight.FillTransparency    = 0.5
+        highlight.OutlineTransparency = 0.25
+        highlight.Parent              = part
+        target                       = part
+    end
+end
+
+--------------------------------------------------------------------------------
+-- TOOL WATCHER
+--------------------------------------------------------------------------------
+local function watchTool(tool)
+    if not tool:IsA("Tool") or tool.Name ~= TOOL_NAME then return end
+    tool.Equipped:Connect(function()
+        equipped = true
+    end)
+    tool.Unequipped:Connect(function()
+        equipped = false
+        updateHighlight(nil)
+    end)
+end
+
+-- bind existing tools
+for _, tool in ipairs(player.Backpack:GetChildren()) do watchTool(tool) end
+if player.Character then
+    for _, tool in ipairs(player.Character:GetChildren()) do watchTool(tool) end
+end
+
+-- watch for new tools
+player.Backpack.ChildAdded:Connect(watchTool)
+player.CharacterAdded:Connect(function(char)
+    char.ChildAdded:Connect(watchTool)
+end)
+
+--------------------------------------------------------------------------------
+-- INPUT HANDLERS
+--------------------------------------------------------------------------------
+-- Desktop hover
+mouse.Move:Connect(function()
+    if equipped then
+        updateHighlight(mouse.Target)
+    end
+end)
+
+-- Desktop double‐click
+mouse.Button1Down:Connect(function()
+    if not (equipped and target) then return end
+    local now = tick()
+    if now - lastClick <= DOUBLE_TAP_TIME then
+        bugPart(target)
+    end
+    lastClick = now
+end)
+
+-- Mobile hover
+UserInputService.InputChanged:Connect(function(inp)
+    if not (equipped and inp.UserInputType == Enum.UserInputType.Touch) then return end
+    local cam    = workspace.CurrentCamera
+    local ray    = cam:ScreenPointToRay(inp.Position.X, inp.Position.Y)
+    local params = RaycastParams.new()
+    params.FilterDescendantsInstances = { localPlate }
+    params.FilterType                 = Enum.RaycastFilterType.Blacklist
+    local res = workspace:Raycast(ray.Origin, ray.Direction*1000, params)
+    updateHighlight(res and res.Instance or nil)
+end)
+
+-- Mobile double‐tap
+UserInputService.InputBegan:Connect(function(inp, processed)
+    if processed or not (equipped and inp.UserInputType == Enum.UserInputType.Touch) then 
+        return 
+    end
+    local now = tick()
+    if now - lastClick <= DOUBLE_TAP_TIME and target then
+        bugPart(target)
+    end
+    lastClick = now
+end)
