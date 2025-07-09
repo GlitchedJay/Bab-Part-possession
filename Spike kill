@@ -1,0 +1,167 @@
+-- SpikeKill
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Remotes
+local Remotes      = ReplicatedStorage:WaitForChild("Remotes")
+local StampAsset   = Remotes:WaitForChild("StampAsset")
+local DeleteAsset  = Remotes:WaitForChild("DeleteAsset")
+
+-- Asset data
+local SPIKE_ID     = 41324903
+local SPIKE_UID    = "{68df2fcf-1fd5-4030-b889-52d1a4958996}"
+
+-- State
+local boxPart, spikeModel, guidePart
+local followMode = "guide"
+local targetHRP
+local boxWatcher, constraintWatcher
+
+-- Utility: find the local player's plate & ActiveParts
+local function getPlate()
+    local lp = Players.LocalPlayer
+    for _, pf in ipairs(workspace:WaitForChild("Plates"):GetChildren()) do
+        if pf:FindFirstChild("Owner") and pf.Owner.Value == lp then
+            return pf:FindFirstChild("Plate"), pf:FindFirstChild("ActiveParts")
+        end
+    end
+    error("Could not find Plate/ActiveParts for local player")
+end
+
+-- Wait until a new child appears in 'folder' that wasn't in 'before'
+local function waitForNewModel(folder, before, timeout)
+    timeout = timeout or 2
+    local deadline = tick() + timeout
+    while tick() < deadline do
+        for _, c in ipairs(folder:GetChildren()) do
+            if not table.find(before, c) then
+                return c
+            end
+        end
+        RunService.Heartbeat:Wait()
+    end
+    error("Timed out waiting for new spike model")
+end
+
+-- Cleanup watchers & old model
+local function tearDown()
+    if boxWatcher then
+        boxWatcher:Disconnect()
+        boxWatcher = nil
+    end
+    if constraintWatcher then
+        constraintWatcher:Disconnect()
+        constraintWatcher = nil
+    end
+    if spikeModel then
+        -- delete on server as well
+        pcall(DeleteAsset.InvokeServer, DeleteAsset, spikeModel)
+        spikeModel:Destroy()
+        spikeModel = nil
+    end
+end
+
+-- Respawn (teardown + setup)
+local function respawnSpike()
+    tearDown()
+    spawnAndSetup()
+end
+
+-- Core setup routine
+function spawnAndSetup()
+    local plate, active = getPlate()
+
+    -- Stamp the spike
+    local before = active:GetChildren()
+    local cf = plate.CFrame * CFrame.new(0, plate.Size.Y/2 + 5, 0)
+    StampAsset:InvokeServer(SPIKE_ID, cf, SPIKE_UID, {}, 0)
+
+    -- Capture the new model
+    local mdl = waitForNewModel(active, before)
+    spikeModel = mdl
+
+    -- Find the Box (or fallback to any BasePart inside Spikes_Simple)
+    local simple = spikeModel:FindFirstChild("Spikes_Simple")
+    if not simple then
+        error("Spikes_Simple submodel missing")
+    end
+    boxPart = simple:FindFirstChild("Box") 
+           or simple:FindFirstChildWhichIsA("BasePart", true)
+    if not (boxPart and boxPart:IsA("BasePart")) then
+        error("Could not find any BasePart in Spikes_Simple")
+    end
+
+    -- Free it for moving
+    boxPart.Anchored   = false
+    boxPart.CanCollide = false
+
+    -- (Re)create the GuidePart 50 studs below
+    if not guidePart then
+        guidePart = Instance.new("Part")
+        guidePart.Name       = "GuidePart"
+        guidePart.Size       = Vector3.new(1,1,1)
+        guidePart.Anchored   = true
+        guidePart.CanCollide = false
+        guidePart.Parent     = workspace
+    end
+    guidePart.CFrame = plate.CFrame * CFrame.new(0, -(plate.Size.Y/2 + 50), 0)
+
+    -- Reset follow state
+    followMode = "guide"
+    targetHRP  = nil
+
+    -- Watch for the Box being removed → respawn
+    boxWatcher = boxPart.AncestryChanged:Connect(function(_, parent)
+        if not parent then
+            respawnSpike()
+        end
+    end)
+
+    -- Watch for any Constraint being added under the spikeModel → respawn
+    constraintWatcher = spikeModel.DescendantAdded:Connect(function(desc)
+        if desc:IsA("Constraint") then
+            respawnSpike()
+        end
+    end)
+end
+
+-- Per-frame snap logic (no welds)
+RunService.Heartbeat:Connect(function()
+    if not boxPart or not guidePart then return end
+    if followMode == "player" and targetHRP and targetHRP.Parent then
+        boxPart.CFrame = targetHRP.CFrame
+    else
+        boxPart.CFrame = guidePart.CFrame
+    end
+end)
+
+-- Click listener + death-return
+local function setupClickListener()
+    local mouse = Players.LocalPlayer:GetMouse()
+    mouse.Button1Down:Connect(function()
+        local hit = mouse.Target
+        if not hit then return end
+        local char = hit:FindFirstAncestorOfClass("Model")
+        local pl   = char and Players:GetPlayerFromCharacter(char)
+        if pl and pl ~= Players.LocalPlayer then
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                targetHRP  = hrp
+                followMode = "player"
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum then
+                    hum.Died:Connect(function()
+                        task.wait(0.1)
+                        followMode = "guide"
+                        targetHRP = nil
+                    end)
+                end
+            end
+        end
+    end)
+end
+
+-- Initialize
+spawnAndSetup()
+setupClickListener()
