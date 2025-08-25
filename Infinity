@@ -1,0 +1,191 @@
+
+--------------------------------------------------------------------------------
+-- SERVICES
+--------------------------------------------------------------------------------
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local Workspace        = game:GetService("Workspace")
+local ReplicatedStorage= game:GetService("ReplicatedStorage")
+
+--------------------------------------------------------------------------------
+-- CONFIG
+--------------------------------------------------------------------------------
+local BUG_ASSET_ID     = 41324945
+local BUG_ASSET_UID    = "{99ab22df-ca29-4143-a2fd-Oa1b79db78c2}"
+local AURA_RADIUS      = 25     -- studs
+local PUSH_SPEED       = 100     -- studs/sec
+local CHECK_INTERVAL   = 0.1    -- seconds
+
+--------------------------------------------------------------------------------
+-- REMOTES
+--------------------------------------------------------------------------------
+local Remotes     = ReplicatedStorage:WaitForChild("Remotes")
+local StampAsset  = Remotes:WaitForChild("StampAsset")
+local DeleteAsset = Remotes:WaitForChild("DeleteAsset")
+
+--------------------------------------------------------------------------------
+-- LOCAL PLAYER & PLATE
+--------------------------------------------------------------------------------
+local LPlayer = Players.LocalPlayer
+local LPlate
+do
+    local plates = Workspace:WaitForChild("Plates")
+    for _, pf in ipairs(plates:GetChildren()) do
+        if pf:FindFirstChild("Owner") and pf.Owner.Value == LPlayer then
+            LPlate = pf:FindFirstChild("Plate")
+            break
+        end
+    end
+    assert(LPlate, "InfinityAura: could not find your Plate")
+end
+
+--------------------------------------------------------------------------------
+-- STATE
+--------------------------------------------------------------------------------
+local AuraPart               -- the visible sphere
+local ActiveAura = {}        -- [plr] = { model=Model, bv=BodyVelocity, toolConns={added,removed} }
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- Stamp the bug asset onto a target HRP
+--------------------------------------------------------------------------------
+local function stampOn(hrp)
+    local before = LPlate.Parent.ActiveParts:GetChildren()
+    StampAsset:InvokeServer(
+        BUG_ASSET_ID,
+        LPlate.CFrame + Vector3.new(0, -2e21, 0),
+        BUG_ASSET_UID,
+        { hrp },
+        0
+    )
+    for _, c in ipairs(LPlate.Parent.ActiveParts:GetChildren()) do
+        if not table.find(before, c) then
+            return c
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Apply effect: stamp + pushback + tool disruption
+--------------------------------------------------------------------------------
+local function applyEffect(plr)
+    if ActiveAura[plr] then return end
+    local char = plr.Character
+    if not char then return end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    -- stamp bug asset
+    local model = stampOn(hrp)
+    if not model then return end
+
+    -- pushback via BodyVelocity on HRP
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e5,1e5,1e5)
+    bv.Velocity = (hrp.Position - AuraPart.Position).Unit * PUSH_SPEED
+    bv.P        = 1000
+    bv.Parent   = hrp
+
+    -- tool disruption: on tool add/remove, reapply effect
+    local added = char.DescendantAdded:Connect(function(inst)
+        if inst:IsA("Tool") then
+            removeEffect(plr)
+            applyEffect(plr)
+        end
+    end)
+    local removed = char.DescendantRemoving:Connect(function(inst)
+        if inst:IsA("Tool") then
+            removeEffect(plr)
+            applyEffect(plr)
+        end
+    end)
+
+    ActiveAura[plr] = { model = model, bv = bv, toolConns = {added, removed} }
+end
+
+--------------------------------------------------------------------------------
+-- Remove effect: delete stamp + velocity + disconnect tool handlers
+--------------------------------------------------------------------------------
+local function removeEffect(plr)
+    local data = ActiveAura[plr]
+    if not data then return end
+    if data.model then
+        pcall(DeleteAsset.InvokeServer, DeleteAsset, data.model)
+    end
+    if data.bv then
+        data.bv:Destroy()
+    end
+    if data.toolConns then
+        data.toolConns[1]:Disconnect()
+        data.toolConns[2]:Disconnect()
+    end
+    ActiveAura[plr] = nil
+end
+
+--------------------------------------------------------------------------------
+-- Create & weld the visible aura sphere at the local HRP
+--------------------------------------------------------------------------------
+local function createAura()
+    if AuraPart then AuraPart:Destroy() end
+    local hrp = LPlayer.Character:WaitForChild("HumanoidRootPart", 5)
+    AuraPart = Instance.new("Part")
+    AuraPart.Name         = "InfinityAura"
+    AuraPart.Shape        = Enum.PartType.Ball
+    AuraPart.Size         = Vector3.new(AURA_RADIUS*2, AURA_RADIUS*2, AURA_RADIUS*2)
+    AuraPart.Material     = Enum.Material.ForceField
+    AuraPart.Color        = Color3.fromRGB(173,216,230)
+    AuraPart.Transparency = 0
+    AuraPart.Anchored     = false
+    AuraPart.Massless     = true
+    AuraPart.CanCollide   = false
+    AuraPart.CFrame       = hrp.CFrame
+    AuraPart.Parent       = Workspace
+
+    local weld = Instance.new("WeldConstraint", AuraPart)
+    weld.Part0 = hrp
+    weld.Part1 = AuraPart
+end
+
+--------------------------------------------------------------------------------
+-- Periodically check players against the sphere radius
+--------------------------------------------------------------------------------
+spawn(function()
+    while true do
+        task.wait(CHECK_INTERVAL)
+        if not AuraPart or not AuraPart.Parent then return end
+        local center = AuraPart.Position
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LPlayer and plr.Character then
+                local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local d = (hrp.Position - center).Magnitude
+                    if d <= AURA_RADIUS then
+                        applyEffect(plr)
+                    else
+                        removeEffect(plr)
+                    end
+                end
+            end
+        end
+    end
+end)
+
+--------------------------------------------------------------------------------
+-- Initialize on spawn and re-create on respawn
+--------------------------------------------------------------------------------
+if LPlayer.Character then
+    createAura()
+end
+LPlayer.CharacterAdded:Connect(createAura)
+
+--------------------------------------------------------------------------------
+-- Cleanup on leave
+--------------------------------------------------------------------------------
+LPlayer.AncestryChanged:Connect(function(_, parent)
+    if not parent then
+        if AuraPart then AuraPart:Destroy() end
+        for plr in pairs(ActiveAura) do
+            removeEffect(plr)
+        end
+    end
+end)
